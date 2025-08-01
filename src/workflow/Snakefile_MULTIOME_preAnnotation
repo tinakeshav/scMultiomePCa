@@ -1,0 +1,199 @@
+# ============================================================================
+# Snakefile: MULTIOME Pre-Annotation Workflow
+# Description: Orchestrates pre-annotation processing for MULTIOME data.
+# Output files can be used to annotate the multiome object with singleR,
+# violin and dot plots and so on. Unfiltered basic QCs are also plotted
+# ============================================================================
+
+# -----------------------------
+# Configuration and Parameters
+# -----------------------------
+
+# Access config variables
+samples_file = config['samples_file']
+date = config['date']
+
+# Read sample names from the provided samples file
+import pandas as pd
+samples_df = pd.read_csv(samples_file, comment='#')
+SAMPLES = samples_df['sample_name'].values
+
+RLOAD = "module load R/4.1.0"
+
+# Specify all expected inputs and outputs for the workflow
+rule all:
+    input:
+        expand("outs/outs/{sample}-outs-per_barcode_metrics.csv", sample=SAMPLES),
+        expand("outs/outs/{sample}-outs-atac_fragments.tsv.gz", sample=SAMPLES),
+        expand("outs/outs/{sample}-outs-filtered_feature_bc_matrix.h5", sample=SAMPLES),
+        expand("data/chromatin_objects-{date}_scores_{sample}_{date}.rds", sample=SAMPLES, date=date),
+        expand("data/multiome_object_unfiltered_{sample}_{date}.rds", sample=SAMPLES, date=date),
+        expand("data/multiome_object_unfiltered_{sample}_{date}metadata.csv", sample=SAMPLES, date=date),
+        expand("figures/QC_plots_samples_{date}.png", date=[date]),
+        expand("data/QC_percentiles_samples_{date}.csv", date=[date]),
+        expand("figures/QC_plots_filtered_samples_{date}.png", date=[date]),
+        expand("data/QC_percentiles_filtered_samples_{date}.csv", date=[date]),
+        expand("figures/{sample}-WNN_integrated-RNA_all_MARKERS_UMAP-{date}.png", sample=SAMPLES, date=date),
+        expand("data/multiome_object_filtered_{sample}_{date}.rds", sample=SAMPLES, date=date),
+        expand("data/multiome_object_filtered_{sample}_{date}_{date}metadata.csv", sample=SAMPLES, date=date),
+        expand("data/multiome_object_filtered_merged_{date}.rds", date=[date]),
+        expand("figures/merged-WNN_integrated-RNA_all_MARKERS_UMAP-{date}.png", date=[date]),
+        expand("figures/merged-VlnPlot_allGenes_RNA_wsnn_res.0.8-{date}.png", date=[date])
+
+# -----------------------------
+# Rule: ATAC Assay Processing
+# -----------------------------
+rule atac_assay:
+    input:
+        fragments="outs/outs/{sample}-outs-atac_fragments.tsv.gz",
+        barcodes="outs/outs/{sample}-outs-per_barcode_metrics.csv"
+    output:
+        "data/chromatin_objects-{date}_scores_{sample}_{date}.rds"
+    run:
+        shell('''
+        {RLOAD}; Rscript scripts/ATAC_getFragmentObj_inputargs_binnedgenome.R \
+        --binnedgenomefilepath ~/common/BSgenome_binned_noSignacblacklist_28092021.rds \
+        --date {date} --figdir figures/ --datadir data/ --workingdir ./ \
+        --makefragobj TRUE --fragmentfile {input.fragments} --barcodesfile {input.barcodes} \
+        --samplename {wildcards.sample}
+        ''')
+
+# -----------------------------
+# Rule: Create Unfiltered Multiome Object
+# -----------------------------
+rule multiome_unfiltered:
+    input:
+        h5_mat="outs/outs/{sample}-outs-filtered_feature_bc_matrix.h5",
+        chromatin_obj="data/chromatin_objects-{date}_scores_{sample}_{date}.rds"
+    output:
+        multiome="data/multiome_object_unfiltered_{sample}_{date}.rds",
+        multiome_metadata="data/multiome_object_unfiltered_{sample}_{date}metadata.csv"
+    run:
+        shell('''
+        {RLOAD}; Rscript scripts/MULTIOME_getUnfilteredMultiomeObj.R \
+        --date {date} --figdir figures/ --datadir data/ --workingdir ./ \
+        --chromatinObjectFile {input.chromatin_obj} --h5File {input.h5_mat} \
+        --sampleName {wildcards.sample}
+        ''')
+
+# -----------------------------
+# Rule: Plot QC for Unfiltered Data
+# -----------------------------
+rule plot_qc:
+    input:
+        expand("data/multiome_object_unfiltered_{sample}_{date}metadata.csv", sample=SAMPLES, date=[date])
+    output:
+        figname="figures/QC_plots_samples_{date}.png",
+        csvfile="data/QC_percentiles_samples_{date}.csv"
+    run:
+        shell('''
+        python3 scripts/plot_unfiltered_multiome_qc.py \
+        --metadatafiles {input} --output_csv {output.csvfile} --output_figname {output.figname}
+        ''')
+
+# -----------------------------
+# Rule: Plot QC for Filtered Data
+# -----------------------------
+rule plot_qc_filtered:
+    input:
+        expand("data/multiome_object_filtered_{sample}_{date}_{date}metadata.csv", sample=SAMPLES, date=[date])
+    output:
+        figname="figures/QC_plots_filtered_samples_{date}.png",
+        csvfile="data/QC_percentiles_filtered_samples_{date}.csv"
+    run:
+        shell('''
+        python3 scripts/plot_unfiltered_multiome_qc.py \
+        --metadatafiles {input} --output_csv {output.csvfile} --output_figname {output.figname}
+        ''')
+
+# -----------------------------
+# Rule: Create Filtered Multiome Object
+# -----------------------------
+rule multiome_filtered:
+    input:
+        "data/multiome_object_unfiltered_{sample}_{date}.rds"
+    output:
+        multiome="data/multiome_object_filtered_{sample}_{date}.rds",
+        multiome_metadata="data/multiome_object_filtered_{sample}_{date}_{date}metadata.csv"
+    run:
+        shell('''
+        {RLOAD}; Rscript scripts/MULTIOME_getFilteredMultiomeObj.R \
+        --date {date} --figdir figures/ --datadir data/ --workingdir ./ \
+        --unfilteredMultiomeFile {input} --filteredMultiomeFileSaveName {output.multiome} \
+        --sampleName {wildcards.sample}
+        ''')
+
+# -----------------------------
+# Rule: SingleR Annotation
+# -----------------------------
+rule multiome_singleR:
+    input:
+        "data/multiome_object_filtered_{sample}_{date}.rds"
+    output:
+        "data/multiome_object_filtered_singleR_combined_int_pred_sc_BRCA_{sample}_clusters_{date}.rds"
+    run:
+        shell('''
+        {RLOAD}; Rscript scripts/MULTIOME_singleRMultiomeObj.R \
+        --date {date} --figdir figures/ --datadir data/ --workingdir ./ \
+        --filteredMultiomeFile {input} --sampleName {wildcards.sample}
+        ''')
+
+# -----------------------------
+# Rule: DotPlot for Each Sample
+# -----------------------------
+rule multiome_dotplot:
+    input:
+        "data/multiome_object_filtered_{sample}_{date}.rds"
+    output:
+        "figures/{sample}-WNN_integrated-RNA_all_MARKERS_UMAP-{date}.png"
+    run:
+        shell('''
+        {RLOAD}; Rscript scripts/MULTIOME_WNN_DotPlots.R \
+        --date {date} --figdir figures/ --datadir data/ --workingdir ./ \
+        --filteredMultiomeFile {input} --sampleName {wildcards.sample}
+        ''')
+
+# -----------------------------
+# Rule: Merge Filtered Multiome Objects
+# -----------------------------
+rule merge_multiome:
+    input:
+        expand("data/multiome_object_filtered_{sample}_{date}.rds", sample=SAMPLES, date=[date])
+    output:
+        "data/multiome_object_filtered_merged_{date}.rds"
+    run:
+        shell('''
+        {RLOAD}; Rscript scripts/MULTIOME_mergeMultiomeObjs.R \
+        --date {date} --figdir figures/ --datadir data/ --workingdir ./ \
+        --multiomeFiles {input} --mergedMultiomeFileName {output}
+        ''')
+
+# -----------------------------
+# Rule: DotPlot for Merged Object
+# -----------------------------
+rule merge_multiome_dotplot:
+    input:
+        "data/multiome_object_filtered_merged_{date}.rds"
+    output:
+        "figures/merged-WNN_integrated-RNA_all_MARKERS_UMAP-{date}.png"
+    run:
+        shell('''
+        {RLOAD}; Rscript scripts/MULTIOME_WNN_VlnDotPlots.R \
+        --date {date} --figdir figures/ --datadir data/ --workingdir ./ \
+        --filteredMultiomeFile {input} --sampleName merged
+        ''')
+
+# -----------------------------
+# Rule: Violin Plot for Merged Object
+# -----------------------------
+rule merge_multiome_vlnplot:
+    input:
+        "data/multiome_object_filtered_merged_{date}.rds"
+    output:
+        "figures/merged-VlnPlot_allGenes_RNA_wsnn_res.0.8-{date}.png"
+    run:
+        shell('''
+        {RLOAD}; Rscript scripts/MULTIOME_WNN_VlnDotPlots.R \
+        --date {date} --figdir figures/ --datadir data/ --workingdir ./ \
+        --filteredMultiomeFile {input} --sampleName merged
+        ''')

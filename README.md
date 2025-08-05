@@ -14,4 +14,5 @@ Analyses and plotting functions
 - ```comparisons of cellbender```
 
 
-Downstream data for figures are stored in the ```data/``` folder on ```codeocean.com/capsule/1317228```.
+All raw FASTQs are accessed through EGA study: EGAS50000000524.
+All pre-processed and processed multiome and metadata files used in all scripts addressed here can be downloaded from GEO: GSE271675.

@@ -1,0 +1,232 @@
+# ============================================================================
+# Snakefile: Intra-Patient Peaks Workflow
+# Description: Cluster level peak calling, merging, and processing 
+# for intra-patient samples.
+# Output files include fragment files, MACS3 peaks, iterative merging metadata,
+# non-overlapping peaks, promoter/non-promoter peaks, and pseudobulk correlations.
+# Output files are used for figure 1 and 3+
+# ============================================================================
+
+# -----------------------------
+# Configuration:
+# A bit complicated because I'm using 'sample' wildcard in output DIRECTORIES
+# And snakemake hates that. So I'm using a dictionary to store the sample info
+# And outputs are mostly just text files confirming that a rule has run.
+# But it gets the job done!
+
+import pandas as pd
+import os
+
+# Access config variables
+samples_file = config['samples_file']
+tss_file = config['tss_file']
+blacklist = '/cluster/home/tkeshava/common/ENCFF356LFX.bed'
+
+# Read sample names and sample info from the provided samples file
+SAMPLES_DF = pd.read_csv(samples_file, comment='#', index_col=0)
+sample_dict = SAMPLES_DF.to_dict(orient='index')
+SAMPLES = list(sample_dict.keys())
+
+# Make required directories for iterative merging rule
+for s_name in SAMPLES:
+    os.makedirs(f'data/intrapat_peaks/{s_name}', exist_ok=True)
+
+
+rule all:
+    input:
+        expand("data/intrapat_peaks/{sample}_frag_files_fin_snakemake_output.txt", sample=SAMPLES),
+        expand("data/intrapat_peaks/{sample}_macs3_peaks_fin_snakemake_output.txt", sample=SAMPLES),
+        expand("data/intrapat_peaks/{sample}_macs3_iterative_merging_metadata.tsv", sample=SAMPLES),
+        expand("data/intrapat_peaks/{sample}/All_Samples.fwp.filter.non_overlapping.rds", sample=SAMPLES),
+        expand("data/intrapat_peaks/{sample}/All_Samples.fwp.filter.non_overlapping.bed", sample=SAMPLES),
+        expand("data/intrapat_peaks/{sample}/All_Samples.fwp.filter.non_overlapping_promoter_peaks.bed", sample=SAMPLES),
+        expand("data/intrapat_peaks/{sample}/All_Samples.fwp.filter.non_overlapping_non_promoter_peaks.bed", sample=SAMPLES),
+        expand("data/intrapat_peaks/{sample}_multiome_intrapat_peaks_chromatin_assay_saved.txt", sample=SAMPLES),
+        expand("data/intrapat_peaks/{sample}_multiome_intrapat_peaks_deseq2_corrs_saved.txt", sample=SAMPLES),
+        expand("data/intrapat_peaks/{sample}_multiome_intrapat_peaks_deseq2_corrs_all_assays_saved.txt", sample=SAMPLES),
+        expand("data/intrapat_peaks/{sample}_multiome_intrapat_peaks_deseq2_corrs_nonPromOrdered_counts_heatmap_COMPLETION.txt", sample=SAMPLES)
+    #    expand("data/intrapat_peaks/{sample}_multiome_intrapat_obj_saved.txt", sample=SAMPLES) rule frag_files:
+    output:
+        "data/intrapat_peaks/{sample}_frag_files_fin_snakemake_output.txt"
+    params:
+        sample_info = lambda wildcards: sample_dict[wildcards.sample]
+    run:
+        shell(f'''
+        module load R/4.1.0; Rscript scripts/MULTIOME_ATAC_get_frag_files_per_cluster.R \
+            --multiomeobjname {{params.sample_info['multiome_obj_file']}} \
+            --metadatatoattach {{params.sample_info['metadata_to_attach']}} \
+            --colname_for_frags {{params.sample_info['peaks_column_name']}} \
+            --date {{params.sample_info['date']}} \
+            --frag_dir 'data/intrapat_peaks' \
+            --output_txtfile {{output}} \
+            --frag_suffix {{wildcards.sample}}
+        ''')
+
+
+rule call_macs3:
+    input:
+        "data/intrapat_peaks/{sample}_frag_files_fin_snakemake_output.txt"
+    output:
+        "data/intrapat_peaks/{sample}_macs3_peaks_fin_snakemake_output.txt"
+    run:
+        shell('''
+        sh scripts/submit_Snakemake_intraPatPeaks_all_callmacs3.sh 'data/intrapat_peaks' 'data/intrapat_peaks/macs' {wildcards.sample}.bed {output}
+        ''')
+
+# -----------------------------
+# Rule: Iterative Overlap Metadata
+# Corces github requires this metadata file to be created
+# I create it according to their instructions
+# https://github.com/corceslab/ATAC_IterativeOverlapPeakMerging
+
+
+rule iter_overlap_metadata:
+    input:
+        "data/intrapat_peaks/{sample}_macs3_peaks_fin_snakemake_output.txt"
+    output:
+        "data/intrapat_peaks/{sample}_macs3_iterative_merging_metadata.tsv"
+    run:
+        import os
+        sample_name = wildcards.sample
+        macs_filepath = 'data/intrapat_peaks/macs/'
+        files = os.listdir(macs_filepath)
+        sample_files = []
+        pattern_to_check = sample_name + '_summits.bed'
+        for file in files:
+            if file.endswith(pattern_to_check):
+                sample_files.append(file[:-len('_summits.bed')])
+        sample_name_repeated = [i for i in range(len(sample_files))]
+        sample_df = pd.DataFrame({'Sample': sample_files, 'Group': sample_name_repeated})
+        print(sample_df)
+        sample_df.to_csv(str(output), index=False, sep='\t')
+
+# -----------------------------
+# Rule: Iterative Overlap
+# Took scripts/createIterativeOverlapPeakSet.R
+# from Corces github
+# https://github.com/corceslab/ATAC_IterativeOverlapPeakMerging
+# and modified it to work with Snakemake
+
+rule iter_overlap:
+    input:
+        tsv="data/intrapat_peaks/{sample}_macs3_iterative_merging_metadata.tsv"
+    output:
+        conrds="data/intrapat_peaks/{sample}/All_Samples.fwp.filter.non_overlapping.rds",
+        conbed="data/intrapat_peaks/{sample}/All_Samples.fwp.filter.non_overlapping.bed"
+    run:
+        shell(f'''
+        module load R/4.1.0; Rscript scripts/createIterativeOverlapPeakSet.R \
+            --metadata {{input.tsv}} \
+            --macs2dir 'data/intrapat_peaks/macs/' \
+            --outdir 'data/intrapat_peaks/{{wildcards.sample}}/' \
+            --suffix _summits.bed \
+            --blacklist {blacklist} \
+            --genome hg38 \
+            --spm 2 \
+            --rule '1' \
+            --extend 250
+        ''')
+
+
+rule get_prom_peaks:
+    # expects bedtools to be installed
+    input:
+        conbed="data/intrapat_peaks/{sample}/All_Samples.fwp.filter.non_overlapping.bed"
+    output:
+        prom_peaks="data/intrapat_peaks/{sample}/All_Samples.fwp.filter.non_overlapping_promoter_peaks.bed",
+        non_prom_peaks="data/intrapat_peaks/{sample}/All_Samples.fwp.filter.non_overlapping_non_promoter_peaks.bed"
+    run:
+        shell(f'''
+	module load bedtools;
+        bedtools intersect -a {{input.conbed}} -b {tss_file} -u > {{output.prom_peaks}};
+        bedtools intersect -a {{input.conbed}} -b {tss_file} -v > {{output.non_prom_peaks}}
+        ''')
+
+
+rule signac_feature_mat:
+    input:
+        con="data/intrapat_peaks/{sample}/All_Samples.fwp.filter.non_overlapping.rds"
+    output:
+        "data/intrapat_peaks/{sample}_multiome_intrapat_peaks_chromatin_assay_saved.txt"
+    params:
+        sample_info = lambda wildcards: sample_dict[wildcards.sample]
+    run:
+        shell(f'''
+        module load R/4.1.0; Rscript scripts/MULTIOME_ATAC_featureMatrix_merged_peaks.R \
+            --multiomeobjname {{params.sample_info['multiome_obj_file']}} \
+            --metadatatoattach {{params.sample_info['metadata_to_attach']}} \
+            --multiomeobjpeaksRDS {{input}} \
+            --date {{params.sample_info['date']}} \
+            --output_fragment_fname {{params.sample_info['new_fragment_obj']}} \
+            --output_txtfile {{output}} \
+            --output_multiome_fname {{params.sample_info['new_multiome_obj']}}
+        ''')
+
+# Note: In this script, we can only obtain promoter and non-promoter correlations
+# between clusters, if and only if the features are in the supplied assay. 
+# Thus, I've limited this script to only take in a single assay, if
+# promoter and non-promoter peaks are user-specified.
+rule pseudobulk_group_proms:
+    input:
+        chrom_assay_saved = "data/intrapat_peaks/{sample}_multiome_intrapat_peaks_chromatin_assay_saved.txt",
+        prom_peaks = "data/intrapat_peaks/{sample}/All_Samples.fwp.filter.non_overlapping_promoter_peaks.bed",
+        non_prom_peaks = "data/intrapat_peaks/{sample}/All_Samples.fwp.filter.non_overlapping_non_promoter_peaks.bed"
+    output:
+        "data/intrapat_peaks/{sample}_multiome_intrapat_peaks_deseq2_corrs_saved.txt"
+    params:
+        sample_info = lambda wildcards: sample_dict[wildcards.sample]
+    run:
+        shell(f'''
+        module load R/4.1.0; Rscript scripts/MULTIOME_getPseudobulkPerGroup.R \
+            --sample_filename {{params.sample_info['new_multiome_obj']}} \
+            --sample_metadata_filename {{params.sample_info['metadata_to_attach']}} \
+            --date {{params.sample_info['date']}} \
+            --assays intrapat_peaks \
+            --pseudobulk_countmat_prefix {{params.sample_info['pseudobulk_countmat_prefix']}} \
+            --colname {{params.sample_info['colname_pseudobulk_population']}} \
+            --output_txtfile {{output}} \
+            --promoter_peaks {{input.prom_peaks}} \
+            --non_promoter_peaks {{input.non_prom_peaks}}
+        ''')
+
+
+rule pseudobulk_group_allassays:
+    input:
+        chrom_assay_saved = "data/intrapat_peaks/{sample}_multiome_intrapat_peaks_chromatin_assay_saved.txt",
+    output:
+        "data/intrapat_peaks/{sample}_multiome_intrapat_peaks_deseq2_corrs_all_assays_saved.txt"
+    params:
+        sample_info = lambda wildcards: sample_dict[wildcards.sample]
+    run:
+        shell(f'''
+        module load R/4.1.0; Rscript scripts/MULTIOME_getPseudobulkPerGroup.R \
+            --sample_filename {{params.sample_info['new_multiome_obj']}} \
+            --sample_metadata_filename {{params.sample_info['metadata_to_attach']}} \
+            --date {{params.sample_info['date']}} \
+            --assays intrapat_peaks ATACv3 RNA ATAC \
+            --pseudobulk_countmat_prefix {{params.sample_info['pseudobulk_countmat_prefix']}} \
+            --colname {{params.sample_info['colname_pseudobulk_population']}} \
+            --output_txtfile {{output}}
+        ''')
+
+rule plot_pseudobulk_groups_allassays:
+    input:
+        all_assays_corrs = "data/intrapat_peaks/{sample}_multiome_intrapat_peaks_deseq2_corrs_all_assays_saved.txt"
+        intrapat_peaks_corrs = "data/intrapat_peaks/{sample}_multiome_intrapat_peaks_deseq2_corrs_saved.txt"
+    output:
+        "data/intrapat_peaks/{sample}_multiome_intrapat_peaks_deseq2_corrs_nonPromOrdered_counts_heatmap_COMPLETION.txt"
+    params:
+        sample_info = lambda wildcards: sample_dict[wildcards.sample]
+    run:
+        shell(f'''
+        module load R/4.1.0; Rscript scripts/fig_plot_population_multiassay_heatmaps.R \
+            --pseudobulk_countmat_prefix {{params.sample_info['pseudobulk_countmat_prefix']}} \
+            --date {{params.sample_info['date']}} \
+            --prefix_filename_for_figures {{params.sample_info['prefix_filename_for_figures']}} \
+            --sample_metadata_filename {{params.sample_info['metadata_to_attach']}} \
+            --colname {{params.sample_info['colname_pseudobulk_population']}} \
+            --assays intrapat_peaks RNA \
+            --sample_counts_file {{params.sample_info['sample_counts_file']}} \
+            --row_annot_cols_filename {{params.sample_info['row_annot_cols_filename']}} \
+            --output_txtfile {{output}}
+        ''')

@@ -1,0 +1,124 @@
+# This file is for running NUMBAT on multiple MULTIOME samples from the same patient
+import pandas as pd
+# Define the default configuration parameters
+default_config = {                                  
+	"samples_file" : "samples_file_patients.csv",
+	"eagle_dir" : '~/common/Eagle_v2.4.1/',
+	"gmap": "~/common/Eagle_v2.4.1/tables/genetic_map_hg38_withX.txt.gz",     # Genetic map file path
+	"snpvcf": "genome1K.phase3.SNP_AF5e2.chr1toX.hg38.vcf",       # SNP VCF file path
+	"paneldir": "1000G_hg38",                                     # Directory for 1000 Genomes panel files
+	"subsampleBarcodes" : "2000" 											# Number of barcodes to subsample each sample to
+}
+
+
+# (user values override defaults)
+config = {**default_config, **config}
+print(config)
+globals().update(config)
+
+RLOADEXEC='module load R/4.1.0'
+
+SAMPLES = pd.read_csv(config['samples_file'], comment = '#', header=0)
+
+LABELS=SAMPLES['label'].unique()
+
+
+def get_param(wildcards, param):
+	return SAMPLES.loc[SAMPLES['sample_name'] == wildcards.sample, param].iloc[0]
+
+def chroms(filepath, suffix):
+	return [filepath + '_chr' + str(i) + suffix for i in range(1,23)]
+
+
+rule all:
+	input:
+		expand('{sample}/numbat/tumor_barcodes.txt', sample = SAMPLES['sample_name']),
+		expand("data/{label}_seurat_object_filtered.rds", label = LABELS),
+		expand("{sample}/pileup/cellSNP.base.vcf",  sample = SAMPLES['sample_name']),
+		expand(chroms("{label}/phasing/{label}_pat", '.vcf.gz'), label = LABELS),
+		expand(chroms("{label}/phasing/{label}_pat", '.vcf.gz.tbi'), label = LABELS),
+		expand(chroms("{label}/phasing/{label}_pat", '.phased.vcf.gz'), label = LABELS),
+		expand('{label}/{sample}_allele_counts.tsv.gz', zip, sample = SAMPLES['sample_name'], label = SAMPLES['label']),
+		expand('{label}/numbat/bulk_clones_final.png', label = LABELS)
+
+rule run_numbat:
+	input:
+		ac = expand('{label}/{sample}_allele_counts.tsv.gz', zip, sample = SAMPLES['sample_name'], label = SAMPLES['label']),
+		tumor_barcodes = expand('{sample}/numbat/tumor_barcodes.txt', sample = SAMPLES['sample_name']),
+		multiome_obj = expand("data/{label}_seurat_object_filtered.rds", label = LABELS)
+	output:
+		'{label}/numbat/bulk_clones_final.png'
+	threads:
+		20	
+	run:
+		shell("""
+		{RLOADEXEC}; Rscript numbat_scripts/run_numbat_patientlevel.R  \\
+			--sampleName {wildcards.sample} \\
+			--alleleCounts {input.ac} \\
+			--labelName {wildcards.label} \\
+			--labelDir {wildcards.label} \\
+			--tumorBarcodes {input.tumor_barcodes} \\
+			--tumorBarcodesSubsample {subsampleBarcodes} \\
+		    --multiomeObj {input.multiome_obj} \\
+			--referenceRDSObj {params.referenceRDSObj} \\
+			--maxEntropy {params.max_entropy} \\
+			--outDir {wildcards.label}/numbat/ \\
+			--ncores {threads}
+		""")
+
+
+#####################################################################################
+# Pileup and Phasing rules for samples with a given label 
+#####################################################################################
+rule genotype:
+	input:
+		vcf_base = expand("{sample}/pileup/cellSNP.base.vcf", sample = SAMPLES['sample_name'])
+	output:
+		chroms("{label}/phasing/{label}_pat", '.vcf.gz'),
+		chroms("{label}/phasing/{label}_pat", '.vcf.gz.tbi')
+	run:
+		shell("""
+		{RLOADEXEC}; sh numbat_scripts/NUMBAT_genotype.sh \\
+			{wildcards.label}/phasing/ \\
+			{wildcards.label}_pat \\
+			{wildcards.label} \\
+			{input.vcf_base}
+		""")
+
+
+rule eagle_phase:
+	input:
+		chroms("{label}/phasing/{label}_pat",  '.vcf.gz')
+	output:
+		chroms("{label}/phasing/{label}_pat", '.phased.vcf.gz')
+	threads:
+		# change as needed 
+		8
+	run:
+		shell("""
+		sh numbat_scripts/NUMBAT_run_eagle.sh \\
+			{eagle_dir} \\
+			{threads} \\
+			{wildcards.label}/phasing/ \\
+			{gmap} \\
+			{paneldir}
+		""")
+
+
+rule numbat_allele_counts:
+	input:
+		cellsnp = "{sample}/pileup/cellSNP.base.vcf",
+		phased_vcf = chroms("{label}/phasing/{label}_pat", '.phased.vcf.gz')
+	output:
+		'{label}/{sample}_allele_counts.tsv.gz'
+	run:
+		shell("""
+		{RLOADEXEC}; Rscript numbat_scripts/allele_counts.R  \\
+			--phased_vcfs {input.phased_vcf} \\
+			--pileup_dirs {wildcards.sample}/pileup/ \\
+			--allele_counts_names {wildcards.sample} \\
+			--outdir  {wildcards.label}/ \\
+			--genome {gtf} \\
+			--gmap {gmap} \\
+			--label {wildcards.label}_pat
+		""")

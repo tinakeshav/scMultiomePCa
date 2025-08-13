@@ -1,0 +1,108 @@
+# ============================================================================
+# Snakefile: CellBender Workflow
+# Description: Runs CellBender on samples with designated parameters.
+# ============================================================================
+
+# -----------------------------
+# Configuration
+
+import pandas as pd
+expected_cells = config['expected_cells']
+samples_file = config['cellbender_params']
+
+# Read sample names and parameters from the provided samples file
+SAMPLES = pd.read_csv(samples_file, comment='#')
+samples_dict = SAMPLES.set_index('name').to_dict(orient='index')
+
+
+rule all:
+    input:
+        expand("outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix.h5",
+            zip,
+            sample=SAMPLES['name'],
+            patient=SAMPLES['patient']),
+        expand("outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix-NCELLS{ncells}_LR{lr}_FPR{fpr}_cellbender_posterior.h5",
+            zip,
+            sample=SAMPLES['name'],
+            ncells=SAMPLES['cells_to_include'],
+            lr=SAMPLES['lr'],
+            fpr=SAMPLES['fpr'],
+            patient=SAMPLES['patient']),
+        expand("outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix-NCELLS{ncells}_LR{lr}_FPR{fpr}_cellbender_posterior_filtered.h5",
+            zip,
+            sample=SAMPLES['name'],
+            ncells=SAMPLES['cells_to_include'],
+            lr=SAMPLES['lr'],
+            fpr=SAMPLES['fpr'],
+            patient=SAMPLES['patient']),
+        expand("outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix-NCELLS{ncells}_LR{lr}_FPR{fpr}_cellbender_posterior_report.html",
+            zip,
+            sample=SAMPLES['name'],
+            ncells=SAMPLES['cells_to_include'],
+            lr=SAMPLES['lr'],
+            fpr=SAMPLES['fpr'],
+            patient=SAMPLES['patient']),
+        expand("outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix-NCELLS{ncells}_LR{lr}_FPR{fpr}_cellbender_posterior_filtered_seurat.h5",
+            zip,
+            sample=SAMPLES['name'],
+            ncells=SAMPLES['cells_to_include'],
+            lr=SAMPLES['lr'],
+            fpr=SAMPLES['fpr'],
+            patient=SAMPLES['patient']),
+        expand("outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix-NCELLS{ncells}_LR{lr}_FPR{fpr}_cellbender_posterior_seurat.h5",
+            zip,
+            sample=SAMPLES['name'],
+            ncells=SAMPLES['cells_to_include'],
+            lr=SAMPLES['lr'],
+            fpr=SAMPLES['fpr'],
+            patient=SAMPLES['patient'])
+
+
+rule run_cellbender:
+    input:
+        "outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix.h5"
+    output:
+        bender_output="outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix-NCELLS{ncells}_LR{lr}_FPR{fpr}_cellbender_posterior.h5",
+        filter_output="outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix-NCELLS{ncells}_LR{lr}_FPR{fpr}_cellbender_posterior_filtered.h5",
+        html_output="outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix-NCELLS{ncells}_LR{lr}_FPR{fpr}_cellbender_posterior_report.html"
+    params:
+        fpr = lambda wildcards: samples_dict[wildcards.sample]['fpr'],
+        lr = lambda wildcards: samples_dict[wildcards.sample]['lr'],
+        ncells = lambda wildcards: samples_dict[wildcards.sample]['cells_to_include']
+    shell:
+        '''
+        echo "Input {input}"
+        echo "Output {output}"
+        echo "FPR {params.fpr}"
+        echo "Cells to include {params.ncells}"
+        echo "Checkpoint {wildcards.sample}_{params.ncells}_{params.lr}.tar.gz"
+        cellbender remove-background \
+            --input {input} \
+            --output {output.bender_output} \
+            --expected-cells {expected_cells} \
+            --total-droplets-included {params.ncells} \
+            --fpr {params.fpr} \
+            --checkpoint {wildcards.sample}_{params.ncells}_{params.lr}_{params.fpr}.tar.gz \
+            --epochs 150 \
+            --cuda \
+            --exclude-feature-types Peaks \
+            --learning-rate {params.lr}
+        '''
+
+
+rule cellbender_to_seurat:
+    input:
+        "outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix-NCELLS{ncells}_LR{lr}_FPR{fpr}_cellbender_posterior_filtered.h5"
+    output:
+        "outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix-NCELLS{ncells}_LR{lr}_FPR{fpr}_cellbender_posterior_filtered_seurat.h5"
+    shell:
+        "ptrepack --complevel 5 {input}:/matrix {output}:/matrix"
+
+
+rule cellbender_unfilt_to_seurat:
+    input:
+        "outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix-NCELLS{ncells}_LR{lr}_FPR{fpr}_cellbender_posterior.h5"
+    output:
+        "outs/{patient}-Cellranger-arc_{sample}-outs-raw_feature_bc_matrix-NCELLS{ncells}_LR{lr}_FPR{fpr}_cellbender_posterior_seurat.h5"
+    shell:
+        "ptrepack --complevel 5 {input}:/matrix {output}:/matrix"

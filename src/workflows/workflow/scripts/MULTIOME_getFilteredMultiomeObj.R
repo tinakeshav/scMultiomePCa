@@ -18,9 +18,7 @@ suppressPackageStartupMessages({
   library(Seurat)
 })
 
-# ================================
-# Argument Parsing
-# ================================
+# parse arguments
 parse_args <- function() {
   parser <- ArgumentParser(description = "Filter and process multiome object.")
   parser$add_argument("--date", type = "character", required = TRUE,
@@ -37,9 +35,9 @@ parse_args <- function() {
                      help = "Filename to save filtered multiome object.")
   parser$add_argument("--sampleName", type = "character", required = TRUE,
                      help = "Sample name for barcode prefix.")
-  parser$add_argument("--nFeature_RNA_max", type = "double", default = 9045)
-  parser$add_argument("--nFeature_RNA_min", type = "double", default = 465)
-  parser$add_argument("--nFeature_ATAC_max", type = "double", default = 42616)
+  parser$add_argument("--nFeature_RNA_max", type = "double", default = 8000)
+  parser$add_argument("--nFeature_RNA_min", type = "double", default = 500)
+  parser$add_argument("--nFeature_ATAC_max", type = "double", default = 80000)
   parser$add_argument("--nFeature_ATAC_min", type = "double", default = 1000)
   parser$add_argument("--percent_mt_max", type = "double", default = 20)
   parser$add_argument("--TSS_enrichment_min", type = "double", default = 2)
@@ -48,9 +46,9 @@ parse_args <- function() {
   return(args)
 }
 
-# ================================
-# Utility Functions
-# ================================
+# -----------------------------
+# Functions
+# -----------------------------
 get_metadata_filename <- function(filtered_file, date) {
   sub(".rds$", paste0("_", date, "metadata.csv"), filtered_file)
 }
@@ -130,9 +128,7 @@ run_multimodal_and_plot <- function(sample, figures_dir, sample_name, date, dims
 }
 
 
-# ================================
-# Workflow
-# ================================
+# main fucnction to run per sample
 
 main <- function() {
   args <- parse_args()

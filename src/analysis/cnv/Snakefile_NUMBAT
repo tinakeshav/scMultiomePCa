@@ -1,0 +1,163 @@
+# Snakemake file to run NUMBAt on any set of samples 
+import pandas as pd
+
+default_config = {                                  
+	"samples_file" : "samples_file.csv",
+	"eagle_dir" : '~/common/Eagle_v2.4.1/',
+	"gmap": "~/common/Eagle_v2.4.1/tables/genetic_map_hg38_withX.txt.gz",     # Genetic map file path
+	"snpvcf": "genome1K.phase3.SNP_AF5e2.chr1toX.hg38.vcf",       # SNP VCF file path
+	"paneldir": "1000G_hg38",                                     # Directory for 1000 Genomes panel files
+	"subsampleBarcodes" : "3000" 											# Number of barcodes to subsample each sample to
+}
+
+# (user values override defaults)
+config = {**default_config, **config}
+print(config)
+globals().update(config)
+
+samples_file = config['samples_file']
+print('reading samples file ', samples_file)
+SAMPLES = pd.read_csv(config['samples_file'], comment = '#', header=0).iloc[0:2]
+
+def get_param(wildcards, param):
+	return SAMPLES.loc[SAMPLES['sample_name'] == wildcards.sample, param].iloc[0]
+
+def chroms(filepath, suffix):
+	return [filepath + '_chr' + str(i) + suffix for i in range(1,23)]
+
+
+rule all:
+	input:
+		expand("data/{sample}_barcodes.txt", sample = SAMPLES['sample_name']),
+		expand("data/{sample}_seurat_object_filtered.rds", sample = SAMPLES['sample_name']),
+		expand("outs/outs/{sample}-outs-gex_possorted_bam.bam", sample = SAMPLES['sample_name']),
+		expand("{sample}/pileup/cellSNP.base.vcf",  sample = SAMPLES['sample_name']),
+		expand(chroms("{sample}/phasing/{sample}",  '.vcf.gz'), sample = SAMPLES['sample_name']),
+		expand(chroms("{sample}/phasing/{sample}",  '.vcf.gz.tbi'), sample = SAMPLES['sample_name']),
+		expand(chroms("{sample}/phasing/{sample}", '.phased.vcf.gz'), sample = SAMPLES['sample_name']),
+		expand('{sample}/{sample}_allele_counts.tsv.gz', sample = SAMPLES['sample_name']),
+		expand('{sample}/numbat/bulk_clones_final.png', sample = SAMPLES['sample_name']),
+		expand('{sample}/numbat/clone_post_2.tsv', sample = SAMPLES['sample_name']),
+		expand('{sample}/numbat/tumor_barcodes.txt', sample = SAMPLES['sample_name'])
+
+rule pileup_cellsnplite:
+	input:
+		bams = "outs/outs/{sample}-outs-gex_possorted_bam.bam",
+		barcodes = "data/{sample}_barcodes.txt"
+	output:
+		"{sample}/pileup/cellSNP.base.vcf"
+	threads: 
+		8 # can change
+	run:
+		shell("""
+		sh numbat_scripts/cellsnp.sh  \\
+			{input.bam} \\
+			{input.barcodes} \\
+			{wildcards.sample}/atac/pileup \\
+			{snpvcf} \\
+			{threads} \\
+			{atac_umitag}
+		""")
+
+
+rule genotype:
+	input:
+		vcf_base = expand("{sample}/pileup/cellSNP.base.vcf", sample = SAMPLES['sample_name'])
+	output:
+		chroms("{sample}/phasing/{sample}", '.vcf.gz'),
+		chroms("{sample}/phasing/{sample}", '.vcf.gz.tbi')
+	run:
+		shell("""
+		{RLOADEXEC}; sh numbat_scripts/NUMBAT_genotype.sh \\
+			{wildcards.sample}/phasing/ \\
+			{wildcards.sample} \\
+			{wildcards.sample} \\
+			{input.vcf_base}
+		""")
+
+
+rule eagle_phase:
+	input:
+		chroms("{sample}/phasing/{sample}",  '.vcf.gz')
+	output:
+		chroms("{sample}/phasing/{sample}", '.phased.vcf.gz')
+	threads:
+		#change as needed 
+		8
+	run:
+		shell("""
+		sh numbat_scripts/NUMBAT_run_eagle.sh \\
+			{eagle_dir} \\
+			{threads} \\
+			{wildcards.sample}/phasing/ \\
+			{gmap} \\
+			{paneldir}
+		""")
+
+
+rule numbat_allele_counts:
+	input:
+		cellsnp = "{sample}/pileup/cellSNP.base.vcf",
+		phased_vcf = chroms("{sample}/phasing/{sample}", '.phased.vcf.gz')
+	output:
+		'{sample}/{sample}_allele_counts.tsv.gz'
+	run:
+		shell("""
+		{RLOADEXEC}; Rscript numbat_scripts/allele_counts.R  \\
+			--phased_vcfs {input.phased_vcf} \\
+			--pileup_dirs {wildcards.sample}/pileup/ \\
+			--allele_counts_names {wildcards.sample} \\
+			--outdir  {wildcards.sample}/ \\
+			--genome {gtf} \\
+			--gmap {gmap} \\
+			--label {wildcards.sample}
+		""")
+
+
+rule run_numbat:
+	input:
+		phased_vcf = chroms("{sample}/phasing/{sample}", '.phased.vcf.gz'),
+		allele_counts = '{sample}/{sample}_allele_counts.tsv.gz',
+		multiome =	'data/{sample}_seurat_object_filtered.rds'
+	output:
+		bulk_clones_final = '{sample}/numbat/bulk_clones_final.png',
+		clones_tsv_final = '{sample}/numbat/clone_post_2.tsv'
+	params:
+		annotation_file = lambda wildcards: get_param(wildcards, 'annotation_file'),
+		referenceRDSObj = lambda wildcards: get_param(wildcards, 'referenceRDSObj'),
+		max_entropy = lambda wildcards: get_param(wildcards, 'max_entropy')
+	threads:
+		16
+	run:
+		shell("""
+		{RLOADEXEC}; Rscript numbat_scripts/run_numbat.R  \\
+			--sampleName {wildcards.sample} \\
+			--referenceRDSObj {params.referenceRDSObj} \\
+			--maxEntropy {params.max_entropy} \\
+			--multiomeObj {input.multiome} \\
+			--alleleCounts {input.allele_counts} \\
+			--out_dir {wildcards.sample}/numbat/ \\
+			--ncores {threads}
+		""")
+
+rule save_sample_barcodes:
+	input:
+		'{sample}/numbat/clone_post_2.tsv'
+	output:
+		'{sample}/numbat/tumor_barcodes.txt'
+	params:
+		annotation_file = lambda wildcards: get_param(wildcards, 'annotation_file'),
+		#TODO MAKE THIS HAPPEN
+		annotation_colname = lambda wildcards: get_param(wildcards, 'cell_type_colname'),
+		annotation_cluster_value = lambda wildcards: get_param(wildcards, 'celltype_cluster_value'),
+	threads:
+		16
+	run:
+		shell("""
+		{RLOADEXEC}; Rscript numbat_scripts/save_sample_barcodes.R \\
+			--clone_post_2 {input.clone_post_2} \\
+			--annotation_file {params.annotation_file} \\
+			--annotation_colname {params.annotation_colname} \\
+			--annotation_cluster_value {params.annotation_cluster_value} \\
+			--out_dir {wildcards.sample}/numbat/
+		""")

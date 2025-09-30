@@ -28,3 +28,5 @@ src
 - ```heterogeneity/```: Obtain entropy values, plot boxplots with tests, etc. Uses outputs from Snakefile_intraPatPeaks
 - ```cnv/```: Snakemake workflows for running  sample and patient-level Numbat and plotting outputs, Patient-level Numbat is contingent on sample-level Numbat runs.  
 	- Note: it uses outputs from Snakefile_intraPatPeaks/_preAnnotation and corresponding annotated metadata.
+
+Written/Developed by @tinakeshav
